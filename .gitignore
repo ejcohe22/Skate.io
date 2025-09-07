@@ -11,9 +11,12 @@
 !deploy.js
 
 # Keep wrapper files (e.g., index.html, CSS, JS around Unity build)
-!wrapper/
-!wrapper/**
+!app/
+!app/**
 
 # Keep the Unity WebGL build
 !Build/
 !Build/**
+!TemplateData/
+!TemplateData/**
+!index.html
