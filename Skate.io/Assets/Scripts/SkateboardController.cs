@@ -14,6 +14,15 @@ public class SkateboardController : MonoBehaviour, Controls.ISkateboardActions
     public float leanAngle = 25f; // how much to tilt visually when turning
     public float groundFriction = 2f;
 
+    [Header("Trick Settings")]
+    public float maxChargeTime = 1.5f;
+    public float flipTorque = 8f;
+    public float spinTorque = 4f;
+    public float levelForce = 4f;
+    public float holdLevelForce = 2f;
+    public float airDamping = 0.995f;
+    public float basePopForce = 8f;
+
     private Rigidbody rb;
     private Controls controls;
     private float turnInput;
@@ -25,6 +34,13 @@ public class SkateboardController : MonoBehaviour, Controls.ISkateboardActions
         rb.interpolation = RigidbodyInterpolation.Interpolate;
 
         trickSystem = new TrickSystem(rb, deckMesh);
+        trickSystem.maxChargeTime = maxChargeTime;
+        trickSystem.flipTorque = flipTorque;
+        trickSystem.spinTorque = spinTorque;
+        trickSystem.levelForce = levelForce;
+        trickSystem.holdLevelForce = holdLevelForce;
+        trickSystem.airDamping = airDamping;
+        trickSystem.basePopForce = basePopForce;
 
         controls = new Controls();
         controls.Skateboard.SetCallbacks(this);
@@ -70,7 +86,7 @@ public class SkateboardController : MonoBehaviour, Controls.ISkateboardActions
         localVel.x *= (1f - groundFriction * Time.fixedDeltaTime);
 
         // Forward: barely dampen (simulate rolling resistance)
-        localVel.z *= (1f - 0.000000000001f * Time.fixedDeltaTime);
+        localVel.z *= 1f;
 
         // Up/down: leave unchanged (gravity handles it)
         rb.linearVelocity = transform.TransformDirection(localVel);
@@ -88,7 +104,7 @@ public class SkateboardController : MonoBehaviour, Controls.ISkateboardActions
         Debug.DrawLine(drawPos, drawPos + rb.linearVelocity, Color.green, 0.1f);
         Debug.DrawLine(drawPos, drawPos + transform.forward * 3f, Color.blue, 0.1f);
 
-        trickSystem.UpdatePhysics(Time.fixedDeltaTime);
+        trickSystem.Tick(Time.fixedDeltaTime);
     }
 
     // ===== Input System Callbacks =====
@@ -98,7 +114,7 @@ public class SkateboardController : MonoBehaviour, Controls.ISkateboardActions
         if (context.performed)
         {
             Vector3 pushDir = transform.forward;
-            rb.AddForce(pushDir * pushForce, ForceMode.VelocityChange);
+            rb.AddForce(pushDir * pushForce, ForceMode.Impulse);
 
             // Clamp max speed
             if (rb.linearVelocity.magnitude > maxSpeed)
@@ -111,47 +127,15 @@ public class SkateboardController : MonoBehaviour, Controls.ISkateboardActions
         turnInput = context.ReadValue<float>();
     }
 
-    public void OnTrickUp(InputAction.CallbackContext context)
-    {
-        if (context.performed)
-        {
-            if (trickSystem.Phase == TrickSystem.TrickPhase.Charging && !trickSystem.IsNollie)
-                trickSystem.Pop();
-            else if (trickSystem.Phase == TrickSystem.TrickPhase.None)
-                trickSystem.StartCharge(true); // nollie
-        }
-        else if (context.canceled)
-        {
-            if (trickSystem.Phase == TrickSystem.TrickPhase.InAir && !trickSystem.IsNollie)
-                trickSystem.Catch();
-        }
-    }
+    public void OnTrickUp(InputAction.CallbackContext context) => ForwardTrickInput(context, TrickSystem.TrickInput.UpPress, TrickSystem.TrickInput.UpHold, TrickSystem.TrickInput.UpRelease);
+    public void OnTrickDown(InputAction.CallbackContext context) => ForwardTrickInput(context, TrickSystem.TrickInput.DownPress, TrickSystem.TrickInput.DownHold, TrickSystem.TrickInput.DownRelease);
+    public void OnTrickLeft(InputAction.CallbackContext context) => ForwardTrickInput(context, TrickSystem.TrickInput.LeftPress, TrickSystem.TrickInput.LeftHold, TrickSystem.TrickInput.LeftRelease);
+    public void OnTrickRight(InputAction.CallbackContext context) => ForwardTrickInput(context, TrickSystem.TrickInput.RightPress, TrickSystem.TrickInput.RightHold, TrickSystem.TrickInput.RightRelease);
 
-    public void OnTrickDown(InputAction.CallbackContext context)
+    private void ForwardTrickInput(InputAction.CallbackContext context, TrickSystem.TrickInput press, TrickSystem.TrickInput hold, TrickSystem.TrickInput release)
     {
-        if (context.performed)
-        {
-            if (trickSystem.Phase == TrickSystem.TrickPhase.Charging && trickSystem.IsNollie)
-                trickSystem.Pop();
-            else if (trickSystem.Phase == TrickSystem.TrickPhase.None)
-                trickSystem.StartCharge(false); // ollie
-        }
-        else if (context.canceled)
-        {
-            if (trickSystem.Phase == TrickSystem.TrickPhase.InAir && trickSystem.IsNollie)
-                trickSystem.Catch();
-        }
-    }
-
-    public void OnTrickLeft(InputAction.CallbackContext context)
-    {
-        if (context.performed)
-            trickSystem.ApplyYaw(-1f);
-    }
-
-    public void OnTrickRight(InputAction.CallbackContext context)
-    {
-        if (context.performed)
-            trickSystem.ApplyYaw(1f);
+        if (context.started) trickSystem.OnInput(press);
+        if (context.performed) trickSystem.OnInput(hold);
+        if (context.canceled) trickSystem.OnInput(release);
     }
 }

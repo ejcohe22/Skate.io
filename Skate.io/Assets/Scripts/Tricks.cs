@@ -1,153 +1,215 @@
 using UnityEngine;
 
-/// <summary>
-/// Physics-driven skateboard trick system: handles ollie/nollie hops,
-/// kickflips, shoveits, and landing skill checks.
-/// </summary>
 public class TrickSystem
 {
-    public enum TrickPhase
-    {
-        None,
-        Charging,
-        Popping,
-        InAir,
-        Catching
-    }
+    public enum TrickPhase { None, Charging, InAir }
+    public enum TrickInput { UpPress, UpHold, UpRelease, DownPress, DownHold, DownRelease, LeftPress, LeftHold, LeftRelease, RightPress, RightHold, RightRelease }
 
     public TrickPhase Phase { get; private set; } = TrickPhase.None;
     public bool IsNollie { get; private set; } = false;
 
     private Rigidbody boardRb;
-    private Transform deckMesh;
     private Transform boardTransform;
 
     private float chargeTime;
+    private float yawCharge;
 
-    private const float maxChargeTime = 0.5f;
-    private const float basePopForce = 5f;
-    private const float flipTorque = 8f;
-    private const float spinTorque = 6f;
-    private const float catchSkillThreshold = 0.85f;
+    private float accumulatedYaw;
+    private float accumulatedFlip;
 
-    public TrickSystem(Rigidbody boardRb, Transform deckMesh)
+    public struct TrickInfo { public int shuvits; public int kickflips; }
+    public TrickInfo LastTrick { get; private set; }
+
+    // Tunables
+    public float maxChargeTime = 2f;
+    public float basePopForce = 2.5f;
+    public float flipTorque = 2f;
+    public float spinTorque = 2f;
+    public float levelForce = 3f;
+    public float holdLevelForce = 2f;
+    public float airDamping = 0.995f;
+    public float popOffset = 0.22f;
+    public float groundCheckDist = .06f;
+    public LayerMask groundMask = ~0; // all layers
+
+    public TrickSystem(Rigidbody rb, Transform t)
     {
-        this.boardRb = boardRb;
-        this.deckMesh = deckMesh;
-        this.boardTransform = boardRb.transform;
+        boardRb = rb;
+        boardTransform = t;
     }
 
-    #region Trick Control
+    public void Tick(float dt)
+    {
+        if (IsGrounded() && Phase != TrickPhase.Charging) Phase = TrickPhase.None;
+        if (Phase == TrickPhase.Charging) chargeTime = Mathf.Min(chargeTime + dt, maxChargeTime);
+        if (Phase == TrickPhase.InAir)
+        {
+            // Air damping
+            boardRb.angularVelocity *= airDamping;
+            accumulatedYaw += Vector3.Dot(boardRb.angularVelocity, Vector3.up) * Mathf.Rad2Deg * dt;
+        }
+    }
+
+    public void OnInput(TrickInput input)
+    {
+        //if (IsGrounded() && Phase != TrickPhase.Charging) Phase = TrickPhase.None;
+        switch (Phase)
+        {
+            case TrickPhase.None:
+                if (input == TrickInput.UpPress) StartCharge(true); // Nollie
+                if (input == TrickInput.DownPress) StartCharge(false); // Ollie
+                break;
+
+            case TrickPhase.Charging:
+                // Start "real trick"
+                // ollie
+                if (input == TrickInput.DownRelease && !IsNollie) Pop();
+                // nollie
+                if (input == TrickInput.UpRelease && IsNollie) Pop();
+
+                // prep shuv
+                if (input == TrickInput.LeftPress) AddYawCharge(-1f);
+                if (input == TrickInput.RightPress) AddYawCharge(+1f);
+
+                // allow early kickflip for skill sake
+                if (input == TrickInput.LeftHold) ApplyFlip(+1f, Time.fixedDeltaTime);
+                if (input == TrickInput.RightHold) ApplyFlip(-1f, Time.fixedDeltaTime);
+                break;
+
+            case TrickPhase.InAir:
+                // Level out
+                // ollie
+                if (input == TrickInput.UpPress && !IsNollie) { Level(); }
+                //nollie
+                if (input == TrickInput.DownPress && IsNollie) { Level(); }
+                
+                // kickflip / heelflip
+                if (input == TrickInput.LeftHold) ApplyFlip(+1f, Time.fixedDeltaTime);
+                if (input == TrickInput.RightHold) ApplyFlip(-1f, Time.fixedDeltaTime);
+                break;
+        }
+
+        Log($"Handled input {input} in phase {Phase}");
+    }
+
+    private bool IsGrounded()
+    {
+        bool val = Physics.Raycast(boardTransform.position, Vector3.down, groundCheckDist, groundMask);
+
+        if (val) Log("Grounded");
+        return val;
+    }
 
     public void StartCharge(bool nollie)
     {
         if (Phase != TrickPhase.None) return;
-
         Phase = TrickPhase.Charging;
         IsNollie = nollie;
-        chargeTime = 0f;
+        chargeTime = yawCharge = 0f;
+        Log($"StartCharge {(nollie ? "Nollie" : "Ollie")}");
     }
 
-    public void UpdateCharge(float deltaTime)
+    public void AddYawCharge(float dir)
     {
-        if (Phase != TrickPhase.Charging) return;
-        chargeTime += deltaTime;
-        if (chargeTime > maxChargeTime) chargeTime = maxChargeTime;
+        yawCharge += dir;
+        Log($"AddYawCharge {dir} → {yawCharge}");
     }
 
     public void Pop()
     {
         if (Phase != TrickPhase.Charging) return;
 
-        Phase = TrickPhase.Popping;
-
         float popForce = basePopForce * (1f + chargeTime / maxChargeTime);
 
-        if (IsNollie)
-            PopNollie(popForce);
-        else
-            PopOllie(popForce);
+        // Pop offset: nose up for ollie, tail up for nollie
+        Vector3 popPoint = boardTransform.position + (boardTransform.forward * popOffset * (IsNollie ? -1f : 1f));
+        
+        // Apply upward force at the pop point to simulate lift
+        boardRb.AddForceAtPosition(Vector3.up * popForce, popPoint, ForceMode.VelocityChange);
 
+        // Seesaw torque with level mechanic to simulate the snap
+        Vector3 seesawAxis = boardTransform.up; 
+        float snapTorque = levelForce * (IsNollie ? 1f : -1f);
+        boardRb.AddTorque(seesawAxis * snapTorque, ForceMode.VelocityChange);
+
+        accumulatedYaw = accumulatedFlip = 0f;
         Phase = TrickPhase.InAir;
+        // Apply yaw/spin torque if charged
+        if (Mathf.Abs(yawCharge) > 0.01f)
+            boardRb.AddTorque(Vector3.up * yawCharge * spinTorque, ForceMode.VelocityChange);
+
+        Log("Pop executed → InAir");
     }
 
-    public void ApplyRoll(float dir = 1f)
+    public void Level()
     {
+        // Leveling is secondary rotation to even out the board
         if (Phase != TrickPhase.InAir) return;
 
-        // Roll along board's forward axis
-        boardRb.AddTorque(boardTransform.forward * dir * flipTorque, ForceMode.VelocityChange);
+        Vector3 levelPoint = boardTransform.position + (boardTransform.forward * popOffset * (IsNollie ? 1f : -1f));
+        boardRb.AddForceAtPosition(Vector3.up * levelForce, levelPoint, ForceMode.VelocityChange);
+        boardRb.AddTorque(boardTransform.up * levelForce * (IsNollie ? -1f : 1f), ForceMode.VelocityChange);
+        Log("Leveled out");
+    }
+    /**
+    public void Pop()
+    {
+        if (Phase != TrickPhase.Charging) return;
+        float popForce = basePopForce * (1f + chargeTime / maxChargeTime);
+        Vector3 popPoint = IsNollie
+            ? boardTransform.position - boardTransform.forward * popOffset
+            : boardTransform.position + boardTransform.forward * popOffset;
+
+        boardRb.AddForceAtPosition(Vector3.up * popForce, popPoint, ForceMode.VelocityChange);
+        if (Mathf.Abs(yawCharge) > 0.01f)
+            boardRb.AddTorque(Vector3.up * yawCharge * spinTorque, ForceMode.VelocityChange);
+
+        accumulatedYaw = accumulatedFlip = 0f;
+        Phase = TrickPhase.InAir;
+        Log("Pop executed → InAir");
     }
 
-    public void ApplyYaw(float dir = 1f)
+    public void Level()
     {
-        if (Phase != TrickPhase.InAir) return;
+        Vector3 popPoint = IsNollie
+            ? boardTransform.position + boardTransform.forward * popOffset
+            : boardTransform.position - boardTransform.forward * popOffset;
 
-        // Yaw spin
-        boardRb.AddTorque(Vector3.up * dir * spinTorque, ForceMode.VelocityChange);
-    }
+        boardRb.AddForceAtPosition(Vector3.up * levelForce, popPoint, ForceMode.VelocityChange);
+        Log($"LevelBurst");
+    }*/
 
-    public void UpdatePhysics(float deltaTime)
+    public void ApplyFlip(float dir, float dt)
     {
-        if (Phase == TrickPhase.InAir)
-        {
-            // Optional: damp angular velocity slightly in air
-            boardRb.angularVelocity *= 0.995f;
-        }
+        // Use the board's right axis for flip tricks (like a football spiraling)
+        boardRb.AddTorque(boardTransform.right * dir * flipTorque, ForceMode.VelocityChange);
+
+        // Track accumulated flip angle around the right axis
+        accumulatedFlip += Vector3.Dot(boardRb.angularVelocity, boardTransform.right) * Mathf.Rad2Deg * dt;
+
+        Log($"ApplyFlip {dir}");
     }
 
     public void Catch()
     {
         if (Phase != TrickPhase.InAir) return;
-
-        Phase = TrickPhase.Catching;
-
-        if (CanCatch())
+        LastTrick = new TrickInfo
         {
-            // Successful landing: damp rotation and velocity
-            boardRb.angularVelocity *= 0.2f;
-            boardRb.linearVelocity *= 0.8f;
-        }
-        else
-        {
-            // Failed catch: leave physics alone, board may flip
-        }
-
-        Reset();
+            shuvits = Mathf.RoundToInt(accumulatedYaw / 180f),
+            kickflips = Mathf.RoundToInt(accumulatedFlip / 360f)
+        };
+        boardRb.angularVelocity *= 0.2f;
+        Phase = TrickPhase.None;
+        Log($"Catch → shuvits:{LastTrick.shuvits}, kickflips:{LastTrick.kickflips}");
     }
 
     public void Reset()
     {
         Phase = TrickPhase.None;
         IsNollie = false;
-        chargeTime = 0f;
+        chargeTime = yawCharge = 0f;
+        accumulatedYaw = accumulatedFlip = 0f;
     }
 
-    #endregion
-
-    #region Private Helpers
-
-    private void PopOllie(float force)
-    {
-        // Front truck pop
-        Vector3 popPoint = boardTransform.position + boardTransform.forward * 0.25f;
-        boardRb.AddForceAtPosition(Vector3.up * force, popPoint, ForceMode.VelocityChange);
-    }
-
-    private void PopNollie(float force)
-    {
-        // Back truck pop
-        Vector3 popPoint = boardTransform.position - boardTransform.forward * 0.25f;
-        boardRb.AddForceAtPosition(Vector3.up * force, popPoint, ForceMode.VelocityChange);
-    }
-
-    private bool CanCatch()
-    {
-        if (deckMesh == null) return true;
-
-        float alignment = Vector3.Dot(deckMesh.up, Vector3.up);
-        return alignment >= catchSkillThreshold;
-    }
-
-    #endregion
+    private void Log(string msg) => Debug.Log($"[TrickSystem] {msg}");
 }
